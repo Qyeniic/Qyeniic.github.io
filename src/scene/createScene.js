@@ -419,7 +419,16 @@ function frame(now){
     x = lerp(x, A[j], e); y = lerp(y, A[j+1], e); z = lerp(z, A[j+2], e);
     var sA = 0.055 + Math.abs(W[i]) * 0.05, sz = lerp(sA, step * 0.6, q); sz = lerp(sz, 0.008 / Math.max(0.3, model.scale.x), gi); sz = lerp(sz, 0.045, c); sz = lerp(sz, sA, e);
     if (pi < 1 && e < 0.01) sz *= lerp(1.8, 1, pi);
-    var fw = reduce ? 0 : follow * mw * FOL[i];
+    // strong cursor follow only while the particles form the sphere (quantization + contact);
+    // not before they have poured in, not on the board, not as stars
+    var sph = pi * lerp((1 - gi) * (1 - c), 1, e);
+    var fw = reduce ? 0 : follow * mw * FOL[i] * sph;
+    // stars: a gentle nudge away from the cursor instead
+    var pw = reduce || !hit || !mouse.active ? 0 : c * (1 - e);
+    if (pw > 0.001){
+      var rx = x - ml.x, ry = y - ml.y, rd2 = rx * rx + ry * ry, push = pw * 0.35 * Math.exp(-rd2 / 0.5) / Math.sqrt(rd2 + 0.02);
+      x += rx * push; y += ry * push;
+    }
     if (fw > 0.001){
       // ride the cursor's recent path: head of the curve is the cursor, the rest trails along where it has been
       var tu = TU[i] * (TN - 1), t0 = Math.floor(tu), t1 = Math.min(TN - 1, t0 + 1), tf = tu - t0, h0 = t0 * 3, h1 = t1 * 3;
