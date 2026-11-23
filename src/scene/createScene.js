@@ -22,9 +22,9 @@ function on(t, ev, fn){ t.addEventListener(ev, fn); offs.push(function(){ t.remo
 function dispose(){
   disposed = true; cancelAnimationFrame(raf); offs.forEach(function(f){ f(); });
   if (lenis) lenis.destroy();
-  if (typeof scene !== 'undefined' && scene) scene.traverse(function(o){
-    if (o.geometry) o.geometry.dispose();
-    if (o.material) [].concat(o.material).forEach(function(m){ if (m.map) m.map.dispose(); m.dispose(); });
+  if (typeof scene !== 'undefined' && scene) scene.traverse(function(n){
+    if (n.geometry) n.geometry.dispose();
+    if (n.material) [].concat(n.material).forEach(function(m){ if (m.map) m.map.dispose(); m.dispose(); });
   });
   if (renderer){ renderer.dispose(); }
 }
@@ -144,11 +144,13 @@ var composer = null, bloom = null;
 var N = 1400, step = 0.3, BOARD_Y = -1.25, DIE_Y = 0.04 + 0.05 + 0.012;   // die top, board-local
 var A = new Float32Array(N * 3), B = new Float32Array(N * 3), C = new Float32Array(N * 3), D = new Float32Array(N * 3);
 var P = new Float32Array(N * 3), CUR = new Float32Array(N * 3), CURS = new Float32Array(N), W = new Float32Array(N), PH = new Float32Array(N), DL = new Float32Array(N), RT = new Float32Array(N);
-var ORD = new Float32Array(N), VEL = new Float32Array(N * 3), dmin = 1e9, dmax = 0;
+var FOL = new Float32Array(N), JO = new Float32Array(N * 3), SW = new Float32Array(N), TU = new Float32Array(N), follow = 0, ORD = new Float32Array(N), VEL = new Float32Array(N * 3), dmin = 1e9, dmax = 0;
 var golden = Math.PI * (3 - Math.sqrt(5)), cols = 40, rows = Math.ceil(N / cols);
 for (i = 0; i < N; i++){
   var yy = 1 - (i / (N - 1)) * 2, rad = Math.sqrt(1 - yy * yy), th = golden * i, r = 1.9 * (0.82 + 0.36 * rnd());
-  W[i] = rnd() * 2 - 1; PH[i] = rnd() * Math.PI * 2; DL[i] = rnd() * 0.5; RT[i] = 3 + rnd() * 4;
+  W[i] = rnd() * 2 - 1; PH[i] = rnd() * Math.PI * 2; FOL[i] = 0.85 + rnd() * 0.15; TU[i] = Math.pow(rnd(), 1.5); SW[i] = (1.5 + rnd() * 3) * (rnd() < 0.5 ? -1 : 1);
+  var ju = rnd() * 2 - 1, jp = rnd() * Math.PI * 2, jq = Math.sqrt(1 - ju * ju), jr = 0.04 + Math.pow(rnd(), 2.2) * 0.55;
+  JO[i*3] = Math.cos(jp) * jq * jr; JO[i*3+1] = Math.sin(jp) * jq * jr; JO[i*3+2] = ju * jr * 0.6; DL[i] = rnd() * 0.5; RT[i] = 3 + rnd() * 4;
   P[i*3] = -2.4 + (rnd() - 0.5) * 12; P[i*3+1] = (rnd() - 0.5) * 8; P[i*3+2] = 9 + rnd() * 7;
   CUR[i*3] = P[i*3]; CUR[i*3+1] = P[i*3+1]; CUR[i*3+2] = P[i*3+2];
   A[i*3] = Math.cos(th) * rad * r; A[i*3+1] = yy * r; A[i*3+2] = Math.sin(th) * rad * r;
@@ -325,7 +327,7 @@ on(window, 'resize', size); size();
 var mouse = {x: 0, y: 0, tx: 0, ty: 0, rx: 0, ry: 0, px: 0, py: 0, active: false};
 on(window, 'pointermove', function(e){ mouse.tx = (e.clientX / window.innerWidth - 0.5) * 2; mouse.ty = (e.clientY / window.innerHeight - 0.5) * 2; mouse.rx = mouse.tx; mouse.ry = mouse.ty; mouse.active = true; });
 on(document, 'pointerleave', function(){ mouse.active = false; });
-var invM = new THREE.Matrix4(), ray = new THREE.Raycaster(), ndc = new THREE.Vector2(), plane = new THREE.Plane(), planeN = new THREE.Vector3(), mwld = new THREE.Vector3(), ml = new THREE.Vector3();
+var invM = new THREE.Matrix4(), ray = new THREE.Raycaster(), ndc = new THREE.Vector2(), plane = new THREE.Plane(), planeN = new THREE.Vector3(), mwld = new THREE.Vector3(), ml = new THREE.Vector3(), TN = 40, TW = new Float32Array(TN * 3), TL = new Float32Array(TN * 3), tAcc = 0, tv = new THREE.Vector3();
 lenis = reduce ? null : new Lenis({lerp: 0.09});
 
 var look = new THREE.Vector3(), spin = 0, last = performance.now(), sSm = 0, first = true, shake = 0, lastEx = 0;
@@ -391,9 +393,20 @@ function frame(now){
   plane.set(planeN.set(0, 0, 1), -model.position.z);
   var hit = ray.ray.intersectPlane(plane, mwld);
   var mw = hit && mouse.active ? 1 - onBoard : 0;
-  if (hit) ml.copy(mwld); model.worldToLocal(ml);
-  var mspeed = Math.min(1, Math.hypot(mouse.rx - mouse.px, mouse.ry - mouse.py) / Math.max(dt, 0.001) * 0.05); mouse.px = mouse.rx; mouse.py = mouse.ry;
-  var MR = 3.4 / Math.max(0.5, model.scale.x);
+  if (hit){ ml.copy(mwld); model.worldToLocal(ml); }
+  // cursor path history: sample at a fixed rate; when the trail is idle every sample sits on the cursor
+  if (hit){
+    // fixed 16ms samples regardless of frame rate (in-between samples are interpolated)
+    var hx = TW[0], hy = TW[1], hz = TW[2], nS = 0; tAcc += dt;
+    while (tAcc >= 0.016 && nS < TN){ tAcc -= 0.016; nS++; }
+    for (var si = 1; si <= nS; si++){ var sf = si / nS; TW.copyWithin(3, 0, TN * 3 - 3); TW[0] = lerp(hx, mwld.x, sf); TW[1] = lerp(hy, mwld.y, sf); TW[2] = lerp(hz, mwld.z, sf); }
+    TW[0] = mwld.x; TW[1] = mwld.y; TW[2] = mwld.z;
+    if (follow < 0.02) for (var ti = 3; ti < TN * 3; ti += 3){ TW[ti] = mwld.x; TW[ti+1] = mwld.y; TW[ti+2] = mwld.z; }
+    for (var tk = 0; tk < TN * 3; tk += 3){ tv.set(TW[tk], TW[tk+1], TW[tk+2]); model.worldToLocal(tv); TL[tk] = tv.x; TL[tk+1] = tv.y; TL[tk+2] = tv.z; }
+  }
+  // follow: rises quickly while the cursor moves, eases back to the sphere once it stops
+  var mv = Math.hypot(mouse.rx - mouse.px, mouse.ry - mouse.py) / Math.max(dt, 0.001); mouse.px = mouse.rx; mouse.py = mouse.ry;
+  var fTarget = clamp(mv * 1.6, 0, 1); follow += (fTarget - follow) * (1 - Math.exp(-dt * (fTarget > follow ? 14 : 1.6)));
   for (i = 0; i < N; i++){
     var j = i * 3, fl = reduce ? 0 : Math.sin(tsec * 1.2 + PH[i]) * 0.05 * (1 - q), pi = sm((pour - DL[i]) / 0.5);
     var x = lerp(A[j], B[j], q), y = lerp(A[j+1], B[j+1], q) + fl, z = lerp(A[j+2], B[j+2], q);
@@ -406,16 +419,19 @@ function frame(now){
     x = lerp(x, A[j], e); y = lerp(y, A[j+1], e); z = lerp(z, A[j+2], e);
     var sA = 0.055 + Math.abs(W[i]) * 0.05, sz = lerp(sA, step * 0.6, q); sz = lerp(sz, 0.008 / Math.max(0.3, model.scale.x), gi); sz = lerp(sz, 0.045, c); sz = lerp(sz, sA, e);
     if (pi < 1 && e < 0.01) sz *= lerp(1.8, 1, pi);
+    var fw = reduce ? 0 : follow * mw * FOL[i];
+    if (fw > 0.001){
+      // ride the cursor's recent path: head of the curve is the cursor, the rest trails along where it has been
+      var tu = TU[i] * (TN - 1), t0 = Math.floor(tu), t1 = Math.min(TN - 1, t0 + 1), tf = tu - t0, h0 = t0 * 3, h1 = t1 * 3;
+      var px = lerp(TL[h0], TL[h1], tf), py = lerp(TL[h0+1], TL[h1+1], tf), pz = lerp(TL[h0+2], TL[h1+2], tf);
+      var th = lerp(0.6, 0.18, TU[i]), sa = tsec * SW[i], cs = Math.cos(sa), sn = Math.sin(sa), ox = (JO[j] * cs - JO[j+1] * sn) * th, oy = (JO[j] * sn + JO[j+1] * cs) * th;
+      x = lerp(x, px + ox, fw); y = lerp(y, py + oy, fw); z = lerp(z, pz + JO[j+2] * th, fw);
+    }
     if (reduce){ CUR[j] = x; CUR[j+1] = y; CUR[j+2] = z; CURS[i] = sz; }
     else {
       // spring toward the target (slightly underdamped, so the cloud wobbles) plus a push and swirl from the cursor
-      var ks = RT[i] * RT[i] * (1 + gi * 3), damp = 2 * Math.sqrt(ks) * 0.7;
+      var ks = RT[i] * RT[i] * (1 + gi * 3 + fw * 3), damp = 2 * Math.sqrt(ks) * 0.7;
       var ax = (x - CUR[j]) * ks - VEL[j] * damp, ay = (y - CUR[j+1]) * ks - VEL[j+1] * damp, az = (z - CUR[j+2]) * ks - VEL[j+2] * damp;
-      if (mw > 0.01){
-        var rx = CUR[j] - ml.x, ry = CUR[j+1] - ml.y, rz = (CUR[j+2] - ml.z) * 0.35, dist = Math.sqrt(rx * rx + ry * ry + rz * rz) + 1e-4;
-        if (dist < MR){ var fall = 1 - dist / MR, pull = mw * (34 + mspeed * 40) * Math.pow(fall, 1.3) / dist, core = dist < 0.35 ? (0.35 - dist) * 120 * mw / dist : 0;
-          ax += -rx * pull + rx * core - ry * pull * 0.35; ay += -ry * pull + ry * core + rx * pull * 0.35; az += -rz * pull * 0.6; }
-      }
       VEL[j] += ax * dt; VEL[j+1] += ay * dt; VEL[j+2] += az * dt;
       CUR[j] += VEL[j] * dt; CUR[j+1] += VEL[j+1] * dt; CUR[j+2] += VEL[j+2] * dt;
       CURS[i] += (sz - CURS[i]) * (1 - Math.exp(-dt * RT[i] * (1 + gi * 3)));
